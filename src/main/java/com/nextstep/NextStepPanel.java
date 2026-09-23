@@ -29,6 +29,8 @@ import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JToggleButton;
+import javax.swing.SwingConstants;
+import java.util.concurrent.ThreadLocalRandom;
 import net.runelite.api.Skill;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
@@ -68,6 +70,11 @@ public class NextStepPanel extends PluginPanel
 	private final JPanel minigamesList = column();
 
 	private PanelData lastData;
+
+	// "Pick for me" wheel
+	private final JLabel wheelLabel = new JLabel(" ", SwingConstants.CENTER);
+	private final JPanel wheelActions = new JPanel(new GridLayout(1, 2, 4, 0));
+	private javax.swing.Timer spinTimer;
 
 	NextStepPanel(NextStepPlugin plugin)
 	{
@@ -257,6 +264,8 @@ public class NextStepPanel extends PluginPanel
 		}
 
 		nextList.add(rankBlock(d));
+		gap(nextList, 8);
+		nextList.add(wheelBlock());
 		gap(nextList, 10);
 
 		if (d.guideName != null)
@@ -487,6 +496,87 @@ public class NextStepPanel extends PluginPanel
 		block.add(stats);
 		block.setMaximumSize(new Dimension(Integer.MAX_VALUE, block.getPreferredSize().height));
 		return block;
+	}
+
+	private JPanel wheelBlock()
+	{
+		JPanel block = new JPanel(new BorderLayout(0, 6));
+		block.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		block.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+		block.setAlignmentX(LEFT_ALIGNMENT);
+
+		JButton spin = new JButton("Can't decide? Pick for me");
+		spin.setFocusable(false);
+		spin.addActionListener(e -> spin());
+
+		wheelLabel.setFont(FontManager.getRunescapeBoldFont());
+		wheelLabel.setForeground(Celebration.GOLD);
+		wheelActions.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+
+		block.add(spin, BorderLayout.NORTH);
+		block.add(wheelLabel, BorderLayout.CENTER);
+		block.add(wheelActions, BorderLayout.SOUTH);
+		block.setMaximumSize(new Dimension(Integer.MAX_VALUE, 400));
+		return block;
+	}
+
+	/** Slot-machine style spin through the Ready list that slows down and lands on one. */
+	private void spin()
+	{
+		PanelData d = lastData;
+		if (d == null || (spinTimer != null && spinTimer.isRunning()))
+		{
+			return;
+		}
+		List<EvaluatedSuggestion> pool = d.ready;
+		wheelActions.removeAll();
+		wheelActions.setVisible(false);
+		if (pool.isEmpty())
+		{
+			wheelLabel.setText("<html><center>Nothing ready yet.<br>Keep training!</center></html>");
+			return;
+		}
+
+		final int total = 22 + ThreadLocalRandom.current().nextInt(8);
+		final int[] step = {0};
+		final EvaluatedSuggestion[] shown = {pool.get(0)};
+		spinTimer = new javax.swing.Timer(45, null);
+		spinTimer.addActionListener(ev ->
+		{
+			EvaluatedSuggestion next = pool.size() == 1 ? pool.get(0)
+				: pool.get(ThreadLocalRandom.current().nextInt(pool.size()));
+			shown[0] = next;
+			wheelLabel.setText("<html><center>" + escape(next.getName()) + "</center></html>");
+			step[0]++;
+			spinTimer.setDelay(45 + step[0] * step[0] / 2);
+			if (step[0] >= total)
+			{
+				spinTimer.stop();
+				finishSpin(shown[0]);
+			}
+		});
+		spinTimer.start();
+	}
+
+	private void finishSpin(EvaluatedSuggestion pick)
+	{
+		Suggestion s = pick.getSuggestion();
+		wheelLabel.setText("<html><center>&#9733; " + escape(s.getName()) + " &#9733;<br>"
+			+ "<font color='#C8C8C8' size='2'>" + escape(s.getReward()) + "</font></center></html>");
+
+		wheelActions.removeAll();
+		if (s.getLocationName() != null)
+		{
+			JButton go = smallButton("Show me", "Get directions");
+			go.addActionListener(a -> plugin.guideTo(s.getName()));
+			wheelActions.add(go);
+		}
+		JButton again = smallButton("Spin again", "Pick something else");
+		again.addActionListener(a -> spin());
+		wheelActions.add(again);
+		wheelActions.setVisible(true);
+		wheelActions.revalidate();
+		plugin.announcePick(s.getName());
 	}
 
 	private JPanel guideBlock(String name)

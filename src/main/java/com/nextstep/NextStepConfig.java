@@ -21,6 +21,9 @@ public interface NextStepConfig extends Config
 	@ConfigSection(name = "Navigation", description = "Showing you where to go", position = 3)
 	String navSection = "navigation";
 
+	@ConfigSection(name = "Drops & milestones", description = "Celebrations for drops, bosses and big milestones", position = 4)
+	String extraSection = "extras";
+
 	// ---------- Suggestions ----------
 	@Range(min = 1, max = 50)
 	@ConfigItem(keyName = "almostThreshold", name = "'Almost there' range",
@@ -189,6 +192,60 @@ public interface NextStepConfig extends Config
 	default boolean sortByDistance()
 	{
 		return false;
+	}
+
+	// ---------- Drops & milestones ----------
+	@ConfigItem(keyName = "collectionLog", name = "Collection log",
+		description = "Celebrate new collection log slots (turn on the game's collection log chat message). Rare items get bigger celebrations.",
+		position = 0, section = extraSection)
+	default boolean collectionLog()
+	{
+		return true;
+	}
+
+	@ConfigItem(keyName = "pets", name = "Pet drops", description = "The biggest celebration of all",
+		position = 1, section = extraSection)
+	default boolean pets()
+	{
+		return true;
+	}
+
+	@ConfigItem(keyName = "luck", name = "Spooned & dry streaks",
+		description = "Special popups when a rare drop comes very early or ends a long dry streak",
+		position = 2, section = extraSection)
+	default boolean luck()
+	{
+		return true;
+	}
+
+	@ConfigItem(keyName = "bossKills", name = "Boss kills", description = "First kill of a boss and kill count milestones",
+		position = 3, section = extraSection)
+	default boolean bossKills()
+	{
+		return true;
+	}
+
+	@ConfigItem(keyName = "milestones", name = "Big milestones",
+		description = "99s, XP milestones, total level and quest progress",
+		position = 4, section = extraSection)
+	default boolean milestones()
+	{
+		return true;
+	}
+
+	@ConfigItem(keyName = "sounds", name = "Celebration sounds", description = "Play a short jingle with each popup",
+		position = 5, section = extraSection)
+	default boolean sounds()
+	{
+		return true;
+	}
+
+	@Range(min = 0, max = 100)
+	@ConfigItem(keyName = "soundVolume", name = "Sound volume", description = "Volume of celebration sounds (0-100)",
+		position = 6, section = extraSection)
+	default int soundVolume()
+	{
+		return 60;
 	}
 
 	// ---------- Hidden state ----------

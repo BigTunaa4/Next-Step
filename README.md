@@ -1,5 +1,14 @@
 # Next Step
 
+## New in v5: the Celebration Pack
+- **Collection log popups**, with bigger effects for rare items: fireworks and a gold RARE DROP! banner for rare slots, and a screen flash, shake and non-stop fireworks for mega-rares (turn on the game's collection log chat message setting)
+- **Pet drops** get the biggest celebration of all
+- **SPOONED!** when a rare drop comes very early, and **FINALLY!** when one ends a long dry streak
+- **Boss kills**: a popup for your first kill of any boss, plus kill count milestones (50, 100, 250, 500, 1000+)
+- **Big milestones**: 99s, XP milestones (1M to 200M), total level and quest progress
+- **Celebration sounds**: a short jingle that gets bigger with rarity (volume adjustable)
+- **Pick for me**: can't decide? Spin the wheel on the Next tab and it picks something from your Ready list
+
 A RuneLite plugin that answers "what should I do next?", guides you there, and celebrates your progress.
 
 ![icon](icon.png)

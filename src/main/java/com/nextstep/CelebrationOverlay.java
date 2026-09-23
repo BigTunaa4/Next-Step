@@ -3,6 +3,7 @@ package com.nextstep;
 import java.awt.AlphaComposite;
 import java.awt.BasicStroke;
 import java.awt.Color;
+import java.awt.Composite;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.FontMetrics;
@@ -25,7 +26,11 @@ import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPosition;
 
-/** Animated celebration popup with spinning rays and confetti. Popups queue up and play one at a time. */
+/**
+ * Animated celebration popup. Popups queue up and play one at a time.
+ * NORMAL: pop-in box, rays, confetti. RARE: adds fireworks and a gold banner.
+ * MEGA: adds a screen flash, popup shake and continuous fireworks.
+ */
 public class CelebrationOverlay extends Overlay
 {
 	private static final int BOX_W = 300;
@@ -33,7 +38,7 @@ public class CelebrationOverlay extends Overlay
 	private static final double INTRO_SECONDS = 0.35;
 	private static final double OUTRO_SECONDS = 0.5;
 	private static final double GRAVITY = 620;
-	private static final int CONFETTI_COUNT = 110;
+	private static final int MAX_PARTICLES = 900;
 	private static final Color[] CONFETTI_COLORS = {
 		new Color(255, 200, 60), new Color(90, 220, 110), new Color(100, 180, 255),
 		new Color(255, 110, 170), new Color(190, 120, 255), new Color(255, 150, 60)
@@ -41,6 +46,7 @@ public class CelebrationOverlay extends Overlay
 
 	private final Client client;
 	private final NextStepConfig config;
+	private final SoundPlayer soundPlayer;
 	private final Queue<Celebration> queue = new ConcurrentLinkedQueue<>();
 	private final List<Particle> particles = new ArrayList<>();
 	private volatile boolean clearRequested;
@@ -48,12 +54,14 @@ public class CelebrationOverlay extends Overlay
 	private Celebration current;
 	private long startNanos;
 	private long lastNanos;
+	private double nextBurst;
 
 	@Inject
-	CelebrationOverlay(Client client, NextStepConfig config)
+	CelebrationOverlay(Client client, NextStepConfig config, SoundPlayer soundPlayer)
 	{
 		this.client = client;
 		this.config = config;
+		this.soundPlayer = soundPlayer;
 		setPosition(OverlayPosition.DYNAMIC);
 		setLayer(OverlayLayer.ABOVE_WIDGETS);
 	}
@@ -67,6 +75,20 @@ public class CelebrationOverlay extends Overlay
 	{
 		queue.clear();
 		clearRequested = true;
+	}
+
+	private double durationFor(Celebration c)
+	{
+		double base = config.popupSeconds();
+		switch (c.getTier())
+		{
+			case MEGA:
+				return base + 4;
+			case RARE:
+				return base + 2;
+			default:
+				return base;
+		}
 	}
 
 	@Override
@@ -89,15 +111,19 @@ public class CelebrationOverlay extends Overlay
 			}
 			startNanos = now;
 			lastNanos = now;
+			nextBurst = 0.45;
 			particles.clear();
 			if (config.confetti())
 			{
-				spawnConfetti();
+				int count = current.getTier() == Celebration.Tier.MEGA ? 260
+					: current.getTier() == Celebration.Tier.RARE ? 180 : 110;
+				spawnConfetti(count);
 			}
+			soundPlayer.play(current.getTier());
 		}
 
 		double t = (now - startNanos) / 1e9;
-		double duration = config.popupSeconds();
+		double duration = durationFor(current);
 		double dt = Math.min(0.05, (now - lastNanos) / 1e9);
 		lastNanos = now;
 
@@ -110,8 +136,27 @@ public class CelebrationOverlay extends Overlay
 
 		int width = client.getCanvasWidth();
 		int height = client.getCanvasHeight();
+		Celebration.Tier tier = current.getTier();
+
+		// Fireworks for RARE (a few) and MEGA (continuous until near the end)
+		if (config.confetti() && tier != Celebration.Tier.NORMAL && t >= nextBurst && t < duration - 1.2)
+		{
+			spawnFirework(width, height);
+			nextBurst += tier == Celebration.Tier.MEGA ? 0.35 : 0.6;
+			if (tier == Celebration.Tier.RARE && nextBurst > 2.6)
+			{
+				nextBurst = Double.MAX_VALUE;
+			}
+		}
+
 		int cx = width / 2;
 		int cy = (int) (height * 0.3);
+		if (tier == Celebration.Tier.MEGA && t < 1.2)
+		{
+			double strength = 8 * (1 - t / 1.2);
+			cx += (int) (ThreadLocalRandom.current().nextDouble(-1, 1) * strength);
+			cy += (int) (ThreadLocalRandom.current().nextDouble(-1, 1) * strength);
+		}
 		float alpha = (float) clamp((duration - t) / OUTRO_SECONDS);
 		double scale = Math.max(0.05, easeOutBack(clamp(t / INTRO_SECONDS)));
 
@@ -120,10 +165,21 @@ public class CelebrationOverlay extends Overlay
 		{
 			g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 			g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+
+			if (tier == Celebration.Tier.MEGA && t < 0.35)
+			{
+				g.setColor(new Color(255, 255, 255, (int) (90 * (1 - t / 0.35))));
+				g.fillRect(0, 0, width, height);
+			}
+
 			g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
-			drawRays(g, cx, cy, t, scale);
+			drawRays(g, cx, cy, t, scale, tier);
 			drawBox(g, cx, cy, scale);
-			updateAndDrawConfetti(g, dt, height);
+			if (current.getBanner() != null)
+			{
+				drawBanner(g, cx, cy, t, scale);
+			}
+			updateAndDrawParticles(g, dt, height);
 		}
 		finally
 		{
@@ -132,14 +188,14 @@ public class CelebrationOverlay extends Overlay
 		return null;
 	}
 
-	private void drawRays(Graphics2D g, int cx, int cy, double t, double scale)
+	private void drawRays(Graphics2D g, int cx, int cy, double t, double scale, Celebration.Tier tier)
 	{
 		Color c = current.getColor();
-		g.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), 45));
-		double radius = 210 * scale;
-		int rays = 12;
+		g.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), tier == Celebration.Tier.NORMAL ? 45 : 70));
+		double radius = (tier == Celebration.Tier.MEGA ? 320 : tier == Celebration.Tier.RARE ? 260 : 210) * scale;
+		int rays = tier == Celebration.Tier.NORMAL ? 12 : 16;
 		double half = Math.PI / rays * 0.45;
-		double spin = t * 0.6;
+		double spin = t * (tier == Celebration.Tier.MEGA ? 1.2 : 0.6);
 		for (int i = 0; i < rays; i++)
 		{
 			double a = spin + i * 2 * Math.PI / rays;
@@ -165,22 +221,50 @@ public class CelebrationOverlay extends Overlay
 		RoundRectangle2D box = new RoundRectangle2D.Double(x, y, BOX_W, BOX_H, 18, 18);
 		g.setPaint(new GradientPaint(0, y, new Color(52, 44, 32), 0, y + BOX_H, new Color(24, 20, 15)));
 		g.fill(box);
-		g.setStroke(new BasicStroke(3f));
+		g.setStroke(new BasicStroke(current.getTier() == Celebration.Tier.NORMAL ? 3f : 4f));
 		g.setColor(c);
 		g.draw(box);
 		g.setStroke(new BasicStroke(1f));
 		g.setColor(new Color(255, 255, 255, 40));
 		g.draw(new RoundRectangle2D.Double(x + 5, y + 5, BOX_W - 10, BOX_H - 10, 12, 12));
 
-		drawCentered(g, current.getTitle(), FontManager.getRunescapeBoldFont().deriveFont(24f), c, y + 30);
-		drawCentered(g, current.getSubtitle(), FontManager.getRunescapeBoldFont().deriveFont(16f), Color.WHITE, y + 54);
-		drawCentered(g, current.getDetail(), FontManager.getRunescapeFont().deriveFont(15f), new Color(210, 210, 210), y + 76);
-		drawCentered(g, current.getCheer(), FontManager.getRunescapeSmallFont().deriveFont(14f), c.brighter(), y + 98);
+		drawCentered(g, current.getTitle(), FontManager.getRunescapeBoldFont().deriveFont(24f), c, y + 30, BOX_W - 24);
+		drawCentered(g, current.getSubtitle(), FontManager.getRunescapeBoldFont().deriveFont(16f), Color.WHITE, y + 54, BOX_W - 24);
+		drawCentered(g, current.getDetail(), FontManager.getRunescapeFont().deriveFont(15f), new Color(210, 210, 210), y + 76, BOX_W - 24);
+		drawCentered(g, current.getCheer(), FontManager.getRunescapeSmallFont().deriveFont(14f), c.brighter(), y + 98, BOX_W - 24);
 
 		g.setTransform(old);
 	}
 
-	private void drawCentered(Graphics2D g, String text, Font font, Color color, int baseline)
+	/** Pulsing gold ribbon above the box, e.g. "RARE DROP!". */
+	private void drawBanner(Graphics2D g, int cx, int cy, double t, double scale)
+	{
+		AffineTransform old = g.getTransform();
+		double pulse = 1 + 0.06 * Math.sin(t * 8);
+		g.translate(cx, cy - (BOX_H / 2.0 + 22) * scale);
+		g.scale(scale * pulse, scale * pulse);
+
+		Font font = FontManager.getRunescapeBoldFont().deriveFont(20f);
+		g.setFont(font);
+		FontMetrics fm = g.getFontMetrics();
+		String text = current.getBanner();
+		int w = fm.stringWidth(text) + 36;
+		int h = 30;
+		RoundRectangle2D pill = new RoundRectangle2D.Double(-w / 2.0, -h / 2.0, w, h, h, h);
+		g.setColor(new Color(255, 200, 60));
+		g.fill(pill);
+		g.setColor(new Color(120, 80, 10));
+		g.setStroke(new BasicStroke(2f));
+		g.draw(pill);
+		int tx = -fm.stringWidth(text) / 2;
+		int ty = fm.getAscent() / 2 - 2;
+		g.setColor(new Color(60, 35, 0));
+		g.drawString(text, tx, ty);
+
+		g.setTransform(old);
+	}
+
+	private void drawCentered(Graphics2D g, String text, Font font, Color color, int baseline, int maxWidth)
 	{
 		if (text == null || text.isEmpty())
 		{
@@ -188,7 +272,7 @@ public class CelebrationOverlay extends Overlay
 		}
 		g.setFont(font);
 		FontMetrics fm = g.getFontMetrics();
-		String fitted = fit(text, fm, BOX_W - 24);
+		String fitted = fit(text, fm, maxWidth);
 		int x = -fm.stringWidth(fitted) / 2;
 		g.setColor(Color.BLACK);
 		g.drawString(fitted, x + 1, baseline + 1);
@@ -210,15 +294,15 @@ public class CelebrationOverlay extends Overlay
 		return s + "...";
 	}
 
-	private void spawnConfetti()
+	private void spawnConfetti(int count)
 	{
 		ThreadLocalRandom r = ThreadLocalRandom.current();
 		double cx = client.getCanvasWidth() / 2.0;
 		double cy = client.getCanvasHeight() * 0.3;
-		for (int i = 0; i < CONFETTI_COUNT; i++)
+		for (int i = 0; i < count && particles.size() < MAX_PARTICLES; i++)
 		{
 			Particle p = new Particle();
-			double angle = r.nextDouble(-Math.PI, 0); // upward half
+			double angle = r.nextDouble(-Math.PI, 0);
 			double speed = r.nextDouble(200, 560);
 			p.x = cx + r.nextDouble(-30, 30);
 			p.y = cy + r.nextDouble(-10, 10);
@@ -232,31 +316,67 @@ public class CelebrationOverlay extends Overlay
 		}
 	}
 
-	private void updateAndDrawConfetti(Graphics2D g, double dt, int canvasHeight)
+	/** A round burst of same-colored sparks somewhere in the upper screen. */
+	private void spawnFirework(int width, int height)
 	{
+		ThreadLocalRandom r = ThreadLocalRandom.current();
+		double x = r.nextDouble(width * 0.15, width * 0.85);
+		double y = r.nextDouble(height * 0.1, height * 0.5);
+		Color color = CONFETTI_COLORS[r.nextInt(CONFETTI_COLORS.length)];
+		for (int i = 0; i < 60 && particles.size() < MAX_PARTICLES; i++)
+		{
+			Particle p = new Particle();
+			double angle = r.nextDouble(0, Math.PI * 2);
+			double speed = r.nextDouble(120, 340);
+			p.x = x;
+			p.y = y;
+			p.vx = Math.cos(angle) * speed;
+			p.vy = Math.sin(angle) * speed;
+			p.rot = 0;
+			p.vrot = 0;
+			p.size = r.nextDouble(3, 5);
+			p.color = r.nextInt(4) == 0 ? Color.WHITE : color;
+			p.spark = true;
+			particles.add(p);
+		}
+	}
+
+	private void updateAndDrawParticles(Graphics2D g, double dt, int canvasHeight)
+	{
+		Composite base = g.getComposite();
 		Iterator<Particle> it = particles.iterator();
 		while (it.hasNext())
 		{
 			Particle p = it.next();
-			p.vy += GRAVITY * dt;
-			p.vx *= (1 - 0.8 * dt);
+			p.age += dt;
+			p.vy += GRAVITY * (p.spark ? 0.35 : 1) * dt;
+			p.vx *= (1 - (p.spark ? 1.5 : 0.8) * dt);
 			p.x += p.vx * dt;
 			p.y += p.vy * dt;
 			p.rot += p.vrot * dt;
-			if (p.y > canvasHeight + 20)
+			if (p.y > canvasHeight + 20 || (p.spark && p.age > 1.6))
 			{
 				it.remove();
 				continue;
 			}
 			AffineTransform old = g.getTransform();
 			g.translate(p.x, p.y);
-			g.rotate(p.rot);
 			g.setColor(p.color);
-			int w = (int) Math.round(p.size);
-			int h = Math.max(2, w / 2);
-			g.fillRect(-w / 2, -h / 2, w, h);
+			if (p.spark)
+			{
+				int s = (int) Math.round(p.size);
+				g.fillOval(-s / 2, -s / 2, s, s);
+			}
+			else
+			{
+				g.rotate(p.rot);
+				int w = (int) Math.round(p.size);
+				int h = Math.max(2, w / 2);
+				g.fillRect(-w / 2, -h / 2, w, h);
+			}
 			g.setTransform(old);
 		}
+		g.setComposite(base);
 	}
 
 	private static double clamp(double v)
@@ -264,7 +384,6 @@ public class CelebrationOverlay extends Overlay
 		return Math.max(0, Math.min(1, v));
 	}
 
-	/** Overshoots slightly then settles: gives the popup a "pop". */
 	private static double easeOutBack(double x)
 	{
 		double c1 = 1.70158;
@@ -281,6 +400,8 @@ public class CelebrationOverlay extends Overlay
 		double rot;
 		double vrot;
 		double size;
+		double age;
+		boolean spark;
 		Color color;
 	}
 }

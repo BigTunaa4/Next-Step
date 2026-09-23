@@ -7,10 +7,13 @@ import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
@@ -38,6 +41,7 @@ import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ColorUtil;
 import net.runelite.client.util.ImageUtil;
+import net.runelite.client.util.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,6 +63,15 @@ public class NextStepPlugin extends Plugin
 	private static final int MAX_INDIVIDUAL_POPUPS = 3;
 	private static final int LATER_LIMIT = 10;
 	private static final int QUEST_CHAT_REFRESH_DELAY = 2;
+
+	private static final String CLOG_PREFIX = "New item added to your collection log:";
+	private static final Pattern KC_PATTERN = Pattern.compile(
+		"Your (?:completed |subdued )?(.+?) (?:kill |chest |completion |success )?count is: ([\\d,]+)");
+	private static final int[] KC_MARKS = {50, 100, 250, 500, 1000, 2000, 5000};
+	private static final int[] TOTAL_MARKS = {500, 750, 1000, 1250, 1500, 1750, 2000, 2100, 2200};
+	private static final int[] QUEST_MARKS = {25, 50, 75, 100};
+	private static final long[] XP_MARKS = {1_000_000L, 5_000_000L, 25_000_000L, 50_000_000L, 100_000_000L, 200_000_000L};
+	private static final String[] XP_LABELS = {"1M", "5M", "25M", "50M", "100M", "200M"};
 
 	@Inject
 	private Client client;
@@ -94,6 +107,15 @@ public class NextStepPlugin extends Plugin
 	private NavigationButton navButton;
 	private List<Suggestion> everything = new ArrayList<>();
 	private int questChatRefreshIn = -1;
+
+	// Drops & milestones
+	private int tickCount;
+	private int lastPetTick = -100;
+	private final Map<Skill, Integer> lastXp = new EnumMap<>(Skill.class);
+	private final Map<String, int[]> lastKc = new HashMap<>(); // boss -> {kc, tick}
+	private final List<Object[]> pendingDrops = new ArrayList<>(); // {item, tick}
+	private int prevTotalLevel = -1;
+	private int prevQuestPct = -1;
 
 	private final Map<Skill, Integer> lastLevels = new EnumMap<>(Skill.class);
 	private boolean dirty = true;
@@ -204,6 +226,28 @@ public class NextStepPlugin extends Plugin
 		{
 			dirty = true;
 		}
+
+		Integer oldXp = lastXp.put(event.getSkill(), event.getXp());
+		if (!baselineSet || !config.milestones())
+		{
+			return;
+		}
+		String skillName = event.getSkill().getName();
+		if (old != null && old < 99 && event.getLevel() >= 99)
+		{
+			announce(Celebration.level99(skillName));
+		}
+		if (oldXp != null)
+		{
+			for (int i = 0; i < XP_MARKS.length; i++)
+			{
+				if (oldXp < XP_MARKS[i] && event.getXp() >= XP_MARKS[i])
+				{
+					Celebration.Tier tier = i >= 4 ? Celebration.Tier.MEGA : i >= 2 ? Celebration.Tier.RARE : Celebration.Tier.NORMAL;
+					announce(Celebration.xpMilestone(skillName, XP_LABELS[i], tier));
+				}
+			}
+		}
 	}
 
 	@Subscribe
@@ -218,11 +262,67 @@ public class NextStepPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
+		if (event.getType() != ChatMessageType.GAMEMESSAGE && event.getType() != ChatMessageType.SPAM)
+		{
+			return;
+		}
+		String msg = Text.removeTags(event.getMessage());
+
 		// Quests have no completion event; the game message is the fastest signal.
-		if (event.getType() == ChatMessageType.GAMEMESSAGE
-			&& event.getMessage().contains("completed a quest"))
+		if (msg.contains("completed a quest"))
 		{
 			questChatRefreshIn = QUEST_CHAT_REFRESH_DELAY;
+			return;
+		}
+
+		if (msg.startsWith(CLOG_PREFIX))
+		{
+			String item = msg.substring(CLOG_PREFIX.length()).trim();
+			// Wait a couple of ticks so the matching kill count message has arrived.
+			pendingDrops.add(new Object[]{item, tickCount});
+			return;
+		}
+
+		if (msg.startsWith("You have a funny feeling like you") || msg.startsWith("You feel something weird sneaking"))
+		{
+			lastPetTick = tickCount;
+			if (config.pets())
+			{
+				announce(Celebration.pet());
+			}
+			return;
+		}
+
+		Matcher m = KC_PATTERN.matcher(msg);
+		if (m.find())
+		{
+			String boss = m.group(1).trim();
+			int kc;
+			try
+			{
+				kc = Integer.parseInt(m.group(2).replace(",", ""));
+			}
+			catch (NumberFormatException e)
+			{
+				return;
+			}
+			lastKc.put(RareDropTable.key(boss), new int[]{kc, tickCount});
+			if (!config.bossKills())
+			{
+				return;
+			}
+			if (kc == 1)
+			{
+				announce(Celebration.firstKill(boss));
+				return;
+			}
+			for (int mark : KC_MARKS)
+			{
+				if (kc == mark)
+				{
+					announce(Celebration.killMilestone(boss, kc));
+				}
+			}
 		}
 	}
 
@@ -231,7 +331,9 @@ public class NextStepPlugin extends Plugin
 	{
 		ticksSinceLogin++;
 		ticksSinceRefresh++;
+		tickCount++;
 		updateGuide();
+		processPendingDrops();
 
 		if (questChatRefreshIn >= 0 && questChatRefreshIn-- == 0)
 		{
@@ -448,10 +550,37 @@ public class NextStepPlugin extends Plugin
 			}
 		}
 
+		int totalLevel = client.getTotalLevel();
+		int questPct = questsTotal > 0 ? questsDone * 100 / questsTotal : 0;
 		if (baselineSet)
 		{
 			celebrateChanges(evaluated, pinnedName, rank);
 			sendNudges(all);
+			if (config.milestones())
+			{
+				for (int mark : TOTAL_MARKS)
+				{
+					if (prevTotalLevel > 0 && prevTotalLevel < mark && totalLevel >= mark)
+					{
+						announce(Celebration.totalLevel(mark));
+					}
+				}
+				if (full)
+				{
+					for (int mark : QUEST_MARKS)
+					{
+						if (prevQuestPct >= 0 && prevQuestPct < mark && questPct >= mark)
+						{
+							announce(Celebration.questProgress(mark));
+						}
+					}
+				}
+			}
+		}
+		prevTotalLevel = totalLevel;
+		if (full)
+		{
+			prevQuestPct = questPct;
 		}
 		else if (ticksSinceLogin >= LOGIN_SETTLE_TICKS)
 		{
@@ -756,6 +885,55 @@ public class NextStepPlugin extends Plugin
 		guideInfo = new GuideInfo(g.getName(), g.getLocationName(), g.getTravelTip(), directions);
 	}
 
+	void announcePick(String name)
+	{
+		clientThread.invokeLater(() -> announce(Celebration.wheel(name)));
+	}
+
+	private void processPendingDrops()
+	{
+		Iterator<Object[]> it = pendingDrops.iterator();
+		while (it.hasNext())
+		{
+			Object[] drop = it.next();
+			if (tickCount - (int) drop[1] < 2)
+			{
+				continue;
+			}
+			it.remove();
+			handleCollectionLog((String) drop[0]);
+		}
+	}
+
+	private void handleCollectionLog(String item)
+	{
+		// A pet popup already covers the pet's own collection log entry.
+		if (tickCount - lastPetTick <= 5 || !config.collectionLog())
+		{
+			return;
+		}
+		Celebration.Tier tier = RareDropTable.tierFor(item);
+		RareDropTable.Entry entry = RareDropTable.find(item);
+		if (entry != null && config.luck())
+		{
+			int[] kc = lastKc.get(RareDropTable.key(entry.source));
+			if (kc != null && tickCount - kc[1] <= 20 && kc[0] > 0)
+			{
+				if ((long) kc[0] * 4 <= entry.rate)
+				{
+					announce(Celebration.spooned(item, kc[0], entry.rate, tier));
+					return;
+				}
+				if (kc[0] >= (long) entry.rate * 2)
+				{
+					announce(Celebration.finallyDrop(item, kc[0], entry.rate, tier));
+					return;
+				}
+			}
+		}
+		announce(Celebration.collectionLog(item, tier));
+	}
+
 	private void announce(Celebration c)
 	{
 		if (config.popups())
@@ -807,6 +985,12 @@ public class NextStepPlugin extends Plugin
 		questsDone = 0;
 		questsTotal = 0;
 		ticksSinceLogin = 0;
+		lastXp.clear();
+		lastKc.clear();
+		pendingDrops.clear();
+		prevTotalLevel = -1;
+		prevQuestPct = -1;
+		lastPetTick = -100;
 		celebrationOverlay.clear();
 	}
 
