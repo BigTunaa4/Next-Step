@@ -78,3 +78,7 @@ Everything is configurable in the plugin settings.
    commit=<full commit hash>
    ```
 4. Open a pull request.
+
+## Support
+
+This plugin is free and always will be. If you enjoy it and want to say thanks, you can leave a tip on Cash App: [$VintageAdVenturesss](https://cash.app/$VintageAdVenturesss). Totally optional, and much appreciated.
